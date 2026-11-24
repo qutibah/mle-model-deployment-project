@@ -41,6 +41,7 @@ Feature importance: `trip_distance` 0.88, `pickup_hour` 0.05, `DOLocationID` 0.0
 | `app/schemas.py` | Pydantic request/response models |
 | `app/main.py` | FastAPI app with `/predict` and `/health` |
 | `sample-request.json` | Example request body |
+| `tests/` | pytest tests for data, features, model, and API |
 
 ## Setup
 
@@ -126,6 +127,21 @@ Invalid input is rejected with a clear `422` error instead of a crash. For examp
 
 `GET /health` returns `{"status": "ok", "model_loaded": true}`.
 
+## Run the Tests
+
+```bash
+uv run pytest
+```
+
+25 tests (about 2 seconds) cover:
+
+- **Data:** duration is computed in minutes, and the outlier rule drops negative, zero, too-short and too-long trips and bad distances.
+- **Features:** expected columns, location IDs as categorical strings, no leaky columns, and string and timestamp pickup times give identical features.
+- **Model:** skops save/load round trip, longer trips predict longer durations, and a helpful error when no model is trained.
+- **API:** `/health`, `200` for a valid trip, `422` for missing or invalid fields, and **API prediction == direct model prediction** (no training/serving skew).
+
+The API tests use a tiny model trained on fake trips, so they don't need the parquet file or the real model.
+
 ## Decisions and Tradeoffs
 
 - **Target:** `duration` in minutes = dropoff time − pickup time.
@@ -155,5 +171,4 @@ Invalid input is rejected with a clear `422` error instead of a crash. For examp
 - **Better features:** a combined pickup–dropoff zone pair, rush-hour/weekend flags, and holidays.
 - **Try other models:** gradient boosting (e.g. LightGBM/XGBoost) is usually faster and more accurate than RandomForest on tabular data.
 - **Smaller model:** the current model file is about 54 MB. Limiting tree depth or the number of trees would make it faster to load and serve.
-- **Tests:** pytest tests for the cleaning rules, the feature function, and the API (200 for valid input, 422 for invalid input).
 - **Docker:** package the API so it runs the same way on any machine.
