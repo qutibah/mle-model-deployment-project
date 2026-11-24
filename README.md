@@ -22,6 +22,7 @@ flowchart LR
 | Mean baseline (always predict the average) | – | 9.75 min |
 | RandomForest — 20 trees, max_depth 10 | 4.32 min | 4.51 min |
 | **RandomForest — 50 trees, max_depth 20, min_samples_leaf 5 (final)** | 3.75 min | **4.30 min** |
+| RandomForest — Optuna-tuned (50 trees, max_depth 31, min_samples_leaf 2, max_features 0.5) | – | 4.19 min |
 
 The final model is off by about **4.3 minutes** on average (RMSE), less than half the error of the mean baseline.
 The small gap between train and validation RMSE shows the model is not badly overfitting.
@@ -37,6 +38,7 @@ Feature importance: `trip_distance` 0.88, `pickup_hour` 0.05, `DOLocationID` 0.0
 | `src/data.py` | Load parquet, compute `duration`, drop unrealistic trips |
 | `src/features.py` | **The single place features are built**, used by training *and* the API |
 | `src/train.py` | Command-line training: trains, logs to MLflow, saves the model |
+| `src/tune.py` | Optuna hyperparameter search, compared against the baseline |
 | `src/model.py` | Save/load the model with skops |
 | `app/schemas.py` | Pydantic request/response models |
 | `app/main.py` | FastAPI app with `/predict` and `/health` |
@@ -142,6 +144,30 @@ uv run pytest
 
 The API tests use a tiny model trained on fake trips, so they don't need the parquet file or the real model.
 
+## Hyperparameter Tuning (Optuna)
+
+```bash
+uv run python -m src.tune            # about 15 minutes: 20 trials + final comparison
+```
+
+Optuna searched `n_estimators` (20–150), `max_depth` (5–40), `min_samples_leaf` (1–20), and `max_features` (1.0, 0.5, 0.3, sqrt) over 20 trials, using its default TPE sampler.
+
+To keep the validation RMSE honest, **trials never see the validation set**. Each trial trains on 40k rows from the training set and is scored on another 10k training rows.
+The best settings are then retrained on the full training set and compared with the baseline on the **same validation set** that gave 4.30.
+All trials are logged to MLflow as child runs of the `optuna-tuning` run.
+
+| | Validation RMSE | Train time | Model size |
+|---|---|---|---|
+| Baseline (50 trees, max_depth 20, min_samples_leaf 5) | 4.296 min | 163 s | 54 MB |
+| Tuned (50 trees, max_depth 31, min_samples_leaf 2, max_features 0.5) | **4.191 min** | 170 s | 158 MB |
+
+**Was the extra complexity worth it? Not for this API.** Tuning improved RMSE by 0.105 minutes (about 6 seconds per trip, 2.4%), but the model file is about **3× larger** because of deeper trees with smaller leaves.
+That means slower start-up and more memory for a gain no rider would notice. The API therefore keeps the baseline model (`artifacts/model.skops`). The tuned model is saved separately as `artifacts/model-tuned.skops`.
+
+What the trials showed:
+- `max_features=0.5` (each split sees half the features) was the biggest improvement.
+- `max_features="sqrt"` and shallow trees (`max_depth` < 12) failed badly, with RMSE 6.6–8.0. With `sqrt`, a split sees only about 23 of about 520 features and often misses `trip_distance`, the most important one.
+
 ## Decisions and Tradeoffs
 
 - **Target:** `duration` in minutes = dropoff time − pickup time.
@@ -166,7 +192,7 @@ The API tests use a tiny model trained on fake trips, so they don't need the par
 ### 2. What would you do differently with more time?
 
 - **Train on all 3.3M trips** instead of a 200k sample, and check how much RMSE improves compared to the extra training time.
-- **Tune hyperparameters with Optuna** and compare the tuned model with this baseline: is the gain worth the extra complexity?
+- **Tune for size as well as accuracy:** try the baseline settings with `max_features=0.5`, or add model size to the Optuna objective, to keep most of the RMSE gain without a 3× larger model.
 - **Validate on February 2025** instead of a random split, which is closer to how the model would be used on future trips.
 - **Better features:** a combined pickup–dropoff zone pair, rush-hour/weekend flags, and holidays.
 - **Try other models:** gradient boosting (e.g. LightGBM/XGBoost) is usually faster and more accurate than RandomForest on tabular data.
